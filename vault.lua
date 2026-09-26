@@ -4,13 +4,13 @@
 
 local TARGET_NAME = "create:item_vault_0"
 local UPDATE_TIME = 1
-local STACK_SIZE = 64
+local DEFAULT_STACK_SIZE = 64
 
 local modem = nil
+local lastNames = {}
 
 local function findWiredModem()
-    local names = peripheral.getNames()
-    for _, side in ipairs(names) do
+    for _, side in ipairs(peripheral.getNames()) do
         local ok, p = pcall(peripheral.wrap, side)
         if ok and p and type(p.isWireless) == "function" then
             local okWireless, wireless = pcall(p.isWireless)
@@ -20,14 +20,6 @@ local function findWiredModem()
         end
     end
     return nil, nil
-end
-
-local function remoteExists(name)
-    if modem and type(modem.isPresentRemote) == "function" then
-        local ok, present = pcall(modem.isPresentRemote, name)
-        return ok and present == true
-    end
-    return false
 end
 
 local function remoteCall(name, method, ...)
@@ -49,41 +41,47 @@ end
 
 local function findVault()
     modem = nil
+    lastNames = {}
 
     local m, side = findWiredModem()
     if not m then
-        return nil, nil, "No wired modem connected"
+        return nil, side, "NO WIRED MODEM"
     end
+
     modem = m
 
-    if remoteExists(TARGET_NAME) then
-        return TARGET_NAME, side, nil
+    local okNames, names = pcall(modem.getNamesRemote)
+    if okNames and type(names) == "table" then
+        lastNames = names
+    else
+        return nil, side, "Cannot read wired network devices"
     end
 
-    -- Fallback: find a remote peripheral which has inventory methods.
-    local ok, names = pcall(modem.getNamesRemote)
-    if ok and type(names) == "table" then
-        for _, name in ipairs(names) do
-            local typeOk, pType = pcall(modem.getTypeRemote, name)
-            if typeOk and pType == "inventory" then
-                return name, side, nil
+    for _, name in ipairs(names) do
+        if name == TARGET_NAME then
+            return name, side, nil
+        end
+    end
+
+    -- Fallback: accept any remote peripheral exposing inventory methods.
+    for _, name in ipairs(names) do
+        local methodOk, methods = pcall(modem.getMethodsRemote, name)
+        if methodOk and type(methods) == "table" then
+            local hasList = false
+            local hasSize = false
+
+            for _, method in ipairs(methods) do
+                if method == "list" then hasList = true end
+                if method == "size" then hasSize = true end
             end
 
-            local methodOk, methods = pcall(modem.getMethodsRemote, name)
-            if methodOk and type(methods) == "table" then
-                local hasList, hasSize = false, false
-                for _, method in ipairs(methods) do
-                    if method == "list" then hasList = true end
-                    if method == "size" then hasSize = true end
-                end
-                if hasList and hasSize then
-                    return name, side, nil
-                end
+            if hasList and hasSize then
+                return name, side, nil
             end
         end
     end
 
-    return nil, side, "Item Vault not found on wired network"
+    return nil, side, "ITEM VAULT NOT FOUND"
 end
 
 local function getStackLimit(name, slot)
@@ -91,7 +89,7 @@ local function getStackLimit(name, slot)
     if ok and type(limit) == "number" and limit > 0 then
         return limit
     end
-    return STACK_SIZE
+    return DEFAULT_STACK_SIZE
 end
 
 local function draw()
@@ -99,29 +97,46 @@ local function draw()
     term.setCursorPos(1, 1)
 
     local width = term.getSize()
-    local line = string.rep("=", math.max(34, width))
+    local line = string.rep("=", math.max(36, width))
 
     print(line)
-    print("             SHRON")
-    print("          ITEM VAULT")
+    print("              SHRON")
+    print("           ITEM VAULT")
     print(line)
     print()
 
-    local vaultName, modemSide, findError = findVault()
+    local vaultName, modemSide, err = findVault()
 
     if not vaultName then
         print("STATUS: NOT CONNECTED")
         print()
-        print(findError or "Unknown error")
+        print(err or "Unknown error")
         print()
+
         if modemSide then
-            print("Wired modem: " .. modemSide)
+            print("Modem: " .. modemSide)
         else
             print("Connect a wired modem to the computer.")
         end
+
         print()
-        print("Press any key for retry...")
-        return false
+        print("Remote devices:")
+
+        if #lastNames == 0 then
+            print("  (none)")
+        else
+            local maxShown = math.min(#lastNames, 8)
+            for i = 1, maxShown do
+                print("  " .. tostring(lastNames[i]))
+            end
+            if #lastNames > maxShown then
+                print("  ... +" .. (#lastNames - maxShown) .. " more")
+            end
+        end
+
+        print()
+        print("Target: " .. TARGET_NAME)
+        return
     end
 
     local okSize, slots = remoteCall(vaultName, "size")
@@ -129,8 +144,8 @@ local function draw()
         print("STATUS: ERROR")
         print()
         print("Cannot read inventory size.")
-        print("Device: " .. vaultName)
-        return false
+        print("Device: " .. tostring(vaultName))
+        return
     end
 
     local okList, items = remoteCall(vaultName, "list")
@@ -138,8 +153,8 @@ local function draw()
         print("STATUS: ERROR")
         print()
         print("Cannot read inventory contents.")
-        print("Device: " .. vaultName)
-        return false
+        print("Device: " .. tostring(vaultName))
+        return
     end
 
     local totalItems = 0
@@ -162,29 +177,17 @@ local function draw()
     print("Vault: " .. vaultName)
     print("Modem: " .. tostring(modemSide))
     print()
-    print("Used slots:   " .. usedSlots .. "/" .. slots)
+    print("Used slots:  " .. usedSlots .. "/" .. slots)
     print()
-    print("FULL STACKS:  " .. fullStacks)
-    print("LOOSE ITEMS:  " .. looseItems)
-    print("TOTAL ITEMS:  " .. totalItems)
+    print("FULL STACKS: " .. fullStacks)
+    print("LOOSE ITEMS: " .. looseItems)
+    print("TOTAL ITEMS: " .. totalItems)
     print()
-    print("1 stack = up to " .. STACK_SIZE .. " items")
-    print()
+    print("Stack size: up to " .. DEFAULT_STACK_SIZE)
     print("Updating every " .. UPDATE_TIME .. " sec.")
-    return true
 end
 
 while true do
-    local ok = pcall(draw)
-
-    if not ok then
-        term.clear()
-        term.setCursorPos(1, 1)
-        print("SHRON")
-        print()
-        print("Unexpected error while reading Item Vault.")
-        print("Retrying...")
-    end
-
+    pcall(draw)
     sleep(UPDATE_TIME)
 end
